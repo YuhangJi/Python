@@ -48,7 +48,7 @@ class PointNet(Model, ABC):
         self.num_point = num_point
         self.num_attribute = num_attribute
         self.num_classes = num_classes
-        self.conv1 = Conv2D_BN(64, [1, self.num_attribute], "conv1")
+        self.conv1 = Conv2D_BN(64, [1, 9], "conv1")
         self.conv2 = Conv2D_BN(64, [1, 1], "conv2")
         self.conv3 = Conv2D_BN(64, [1, 1], "conv3")
         self.conv4 = Conv2D_BN(128, [1, 1], "conv4")

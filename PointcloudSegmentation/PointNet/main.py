@@ -2,13 +2,12 @@ import hyper_parameter
 import provider
 import model
 
-import datetime
-import warnings
 import numpy as np
 import tensorflow as tf
+import xlwt
 
 
-def load_data(test_area):
+def load_data(test_area=6):
     # 读取点云数据
     data_batch_list = []
     label_batch_list = []
@@ -18,13 +17,13 @@ def load_data(test_area):
         data_batch, label_batch = provider.loadDataFile(file_path)
         data_batch_list.append(data_batch)
         label_batch_list.append(label_batch)
-    del data_batch,label_batch
     data_batches = np.concatenate(data_batch_list, 0)
     label_batches = np.concatenate(label_batch_list, 0)
 
     # 划分训练集测试集
     room_filelist_path = provider.getPath(hyper_parameter.DATASET_PATH, hyper_parameter.ROOM_FILELIST_PATH)
     room_filelist = provider.getDataFiles(room_filelist_path)
+    test_area = 'Area_' + str(test_area)
     train_idxs = []
     test_idxs = []
     for i_, room_name in enumerate(room_filelist):
@@ -110,83 +109,71 @@ def train(train_data, train_label, test_data, test_label):
     # Optimizer
     optimizer = getOptimizer()
     # Metric
-    train_loss_metric = tf.keras.metrics.Mean(name='train_loss')
-    train_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='train_acc')
-    test_loss_metric = tf.keras.metrics.Mean(name='test_loss')
-    test_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy(name='test_acc')
+    acc_metric = tf.metrics.SparseCategoricalAccuracy()
+    loss_metric = tf.metrics.Mean()
 
     # Train Step Definition
     def trainOneBatch(batch_data, batch_label):
         with tf.GradientTape() as tape:
             outputs = net(inputs=batch_data, training=True)
-            train_loss_vale = loss_fun(y_true=batch_label, y_pred=outputs)
-        gradients = tape.gradient(train_loss_vale, net.trainable_variables)
+            loss_vale = loss_fun(y_true=batch_label, y_pred=outputs)
+        gradients = tape.gradient(loss_vale, net.trainable_variables)
         optimizer.apply_gradients(grads_and_vars=zip(gradients, net.trainable_variables))
-        train_loss_metric.update_state(values=train_loss_vale)
-        train_acc_metric.update_state(y_true=batch_label, y_pred=outputs)
+        loss_metric.update_state(values=loss_vale)
+        acc_metric.update_state(y_true=batch_label, y_pred=outputs)
 
     # Test Step Definition
     def testOneBatch(batch_data, batch_label):
         outputs = net(inputs=batch_data, training=False)
-        test_loss_value = loss_fun(y_true=batch_label, y_pred=outputs)
-        test_loss_metric.update_state(values=test_loss_value)
-        test_acc_metric.update_state(y_true=batch_label,y_pred=outputs)
+        loss_value = loss_fun(y_true=batch_label, y_pred=outputs)
+        loss_value = tf.reduce_mean(loss_value)
+        acc_value = tf.metrics.sparse_categorical_accuracy(y_pred=outputs, y_true=batch_label)
+        acc_value = tf.reduce_mean(acc_value)
+        return loss_value, acc_value
 
-    # LOGS Tracing
-    stamp = datetime.datetime.now().strftime("Y%m%d-%H%M%S")
-    log_dir = hyper_parameter.LOGS_DIR(hyper_parameter.LOGS,stamp)
-    summary_writer = tf.summary.create_file_writer(log_dir)
-    tf.summary.trace_on(graph=True, profiler=False)
-
-    # Train Model
+    # Train
     print("###***---Training---***###")
-    best_loss = [float('inf')]
-    best_acc = [float('-inf')]  # Breakpoint refreshes to be implemented
+    best_loss = [-0.1]
+    best_acc = [-0.1]  # Breakpoint refreshes to be implemented
     for epoch in range(hyper_parameter.EPOCHS):
-        # Reset Metric
-        train_loss_metric.reset_states()
-        train_acc_metric.reset_states()
-        test_loss_metric.reset_states()
-        test_acc_metric.reset_states()
-
+        total_loss = 0
+        total_acc = 0
+        counts = 0
         for data, label in train_dataset:
             trainOneBatch(data, label)
-
+            total_loss += loss_metric.result()
+            total_acc += acc_metric.result()
+            counts += 1
+        total_loss /= counts
+        total_acc /= counts
         print("---EPOCH {}---".format(epoch))
-        print("train_loss:{},train_acc:{}".format(train_loss_metric.result(), train_acc_metric.result()))
-
-        with summary_writer.as_default():
-            tf.summary.scalar('train_loss', train_loss_metric.result(), step=epoch)
-            tf.summary.scalar('train_accuracy', train_acc_metric.result(), step=epoch)
+        print("train_loss:{},train_acc:{}".format(total_loss, total_acc))
+        loss_metric.reset_states()
+        acc_metric.reset_states()
 
         # Test
         if epoch % hyper_parameter.TEST_FREQUENCE == 0:
+            test_loss = 0
+            test_acc = 0
+            counts_ = 0
             for data_, label_ in test_dataset:
-                testOneBatch(data_, label_)
-
-            if test_loss_metric.result() < best_loss[-1]:
-                best_loss.append(test_loss_metric.result())
-
-            if test_acc_metric.result() > best_acc[-1]:
-                print("test_loss:{},test_acc:{}".format(test_loss_metric.result(), test_acc_metric.result()))
-                best_acc.append(test_acc_metric.result())
+                value_ = testOneBatch(data_, label_)
+                test_loss += value_[0]
+                test_acc += value_[1]
+                counts_ += 1
+            test_loss /= counts_
+            test_acc /= counts_
+            if test_loss >= best_loss[-1]:
+                best_loss.append(test_loss)
+            if test_acc >= best_acc[-1]:
                 net.save_weights(filepath=hyper_parameter.SAVE_PATH, save_format='tf')
                 print("test_acc has been promoted from {} to {}, save weights in {}".format(
-                    best_acc[-2],
                     best_acc[-1],
+                    test_acc,
                     hyper_parameter.LOGS)
                 )
-            else:
-                print("test_loss:{},test_acc:{}".format(test_loss_metric.result(), test_acc_metric.result()))
-
-            with summary_writer.as_default():
-                tf.summary.scalar('test_loss', test_loss_metric.result(), step=epoch)
-                tf.summary.scalar('test_accuracy', test_acc_metric.result(), step=epoch)
-
-    # Stop Tracing and Export
-    with summary_writer.as_default():
-        tf.summary.trace_export(name="model_trace",step=3)
-
+                best_acc.append(test_acc)
+            print("test_loss:{},test_acc:{}".format(test_loss, test_acc))
     print("###***---Training End---***###")
 
 
@@ -214,18 +201,20 @@ def getIoUV1():
                     else:  # enter F
                         fn[k] += 1
     """
-    pass
 
 
-def evaluate(test_data, test_label, file_path,name, isvisualization=False):
-    """
-    :param test_data: numpy array
-    :param test_label: numpy array
-    :param file_path: model weight path
-    :param name: string, room name
-    :param isvisualization: bool, if true, it will generate two point cloud where one is labeled and another is evaluated
-    :return: miou, oa and iou_list
-    """
+def getColorDict():
+    return {
+        0:[255,48,48],1:[255,20,147],2:[255,165,0],
+        3:[138,43,226],4:[255,218,185],5:[139,0,139],
+        6:[139,0,0],7:[0,255,127],8:[0,255,255],
+        9:[255,255,0],10:[219,112,147],11:[131,139,139],
+        12:[210,180,140]
+    }
+
+
+def evaluate(test_data, test_label, file_path, save_name, isvisualization=True):
+    save_name = "Area_" + str(save_name)
     # inference
     net = constructeModel()
     net.load_weights(file_path)
@@ -269,49 +258,57 @@ def evaluate(test_data, test_label, file_path,name, isvisualization=False):
     del mask_tensor,test_sub_tensor,pred_sub_tensor
 
     # visualization
-    color_dict = provider.getColorDict()
     if isvisualization:
+        test_data = np.squeeze(test_data, axis=3)
         # convert a var from tensor to numpy array
-        pred_label_numpy = pred_tensor.numpy()
+        pred_tensor_numpy = pred_tensor.numpy()
         del pred_tensor
         test_label_numpy = test_label.numpy()
         del test_label
-        original_coordinates,original_label = provider.getOriginalCoordinates(
-            name=name,
-            file_path=hyper_parameter.ORIGINAL_COORDINATES_PATH
-        )
-
-        if int(np.sum(original_label - test_label_numpy)) != 0:
-            warnings.warn("Original coordinates is inconsistent with evaluated points")
-
-        with open(name + "_predicted.txt", 'w') as fo_pre:
-            with open(name + "_labeled.txt", 'w') as fo_lab:
-                for i_ in range(original_coordinates.shape[0]):
-                    for j_ in range(original_coordinates.shape[1]):
-                        pred_result = int(pred_label_numpy[i_, j_])
-                        label_result = int(test_label_numpy[i_, j_])
-                        fo_pre.write(
-                            str(original_coordinates[i_, j_, 0]) + " " +
-                            str(original_coordinates[i_, j_, 1]) + " " +
-                            str(original_coordinates[i_, j_, 2]) + " " +
-                            str(color_dict[pred_result][0]) + " " +
-                            str(color_dict[pred_result][1]) + " " +
-                            str(color_dict[pred_result][2]) + " " +
-                            str(pred_result) + "\n"
-                        )
-                        fo_lab.write(
-                            str(original_coordinates[i_, j_, 0]) + " " +
-                            str(original_coordinates[i_, j_, 1]) + " " +
-                            str(original_coordinates[i_, j_, 2]) + " " +
-                            str(color_dict[label_result][0]) + " " +
-                            str(color_dict[label_result][1]) + " " +
-                            str(color_dict[label_result][2]) + " " +
-                            str(label_result) + "\n"
-                        )
+        # rgb xyz slice
+        rgb = np.asarray(test_data[::, ::, 3:6:] * 255, dtype=np.int)
+        xyz = np.asarray(test_data[::, ::, :3:], dtype=np.float)
+        # color dictionary
+        color_dict = getColorDict()
+        with open(save_name+"_pred.xyz",'w') as fo_pred:
+            with open(save_name+"_labeled.xyz", 'w') as fo_labeled:
+                with open(save_name + "_original.xyz", 'w') as fo_orig:
+                    for i in range(test_data.shape[0]):
+                        for j in range(test_data.shape[1]):
+                            # write original rgb
+                            fo_orig.write(
+                                str(round(xyz[i, j, 0], 3)) + " " +
+                                str(round(xyz[i, j, 1], 3)) + " " +
+                                str(round(xyz[i, j, 2], 3)) + " " +
+                                str(rgb[i, j, 0]) + " " +
+                                str(rgb[i, j, 1]) + " " +
+                                str(rgb[i, j, 2]) + " " +
+                                str(test_label_numpy[i, j]) + "\n"
+                            )
+                            # write labeled rgb with a color dictionary
+                            fo_labeled.write(
+                                str(round(xyz[i, j, 0], 3)) + " " +
+                                str(round(xyz[i, j, 1], 3)) + " " +
+                                str(round(xyz[i, j, 2], 3)) + " " +
+                                str(color_dict[test_label_numpy[i, j]][0]) + " " +
+                                str(color_dict[test_label_numpy[i, j]][1]) + " " +
+                                str(color_dict[test_label_numpy[i, j]][2]) + " " +
+                                str(test_label_numpy[i, j]) + "\n"
+                            )
+                            # write predicted rgb with a color dictionary
+                            fo_pred.write(
+                                str(round(xyz[i, j, 0], 3)) + " " +
+                                str(round(xyz[i, j, 1], 3)) + " " +
+                                str(round(xyz[i, j, 2], 3)) + " " +
+                                str(color_dict[pred_tensor_numpy[i, j]][0]) + " " +
+                                str(color_dict[pred_tensor_numpy[i, j]][1]) + " " +
+                                str(color_dict[pred_tensor_numpy[i, j]][2]) + " " +
+                                str(pred_tensor_numpy[i, j]) + "\n"
+                            )
 
     with open("evaluation.txt","a") as fo_eval:
         fo_eval.write(
-            name + '\n' +
+            save_name + '\n' +
             "mIoU:{}\nOA:{}\nIoU_list:{}\n".format(miou_.numpy(),oa_.numpy(),iou_list_)
         )
     return miou_.numpy(), oa_.numpy(), iou_list_
@@ -327,22 +324,21 @@ def kFoldCrossVal(k_fold):
     miou, oa, iou_list = evaluate(test_data=test_point,
                                   test_label=test_labels,
                                   file_path=hyper_parameter.SAVE_PATH,
-                                  name=k_fold,
-                                  isvisualization=True)
+                                  save_name=k_fold)
     return miou, oa, iou_list
 
 
 if __name__ == '__main__':
-    k_fold_list = ["li_jing_xuan", "tai_ji_dian", "tong_dao_tang", "yan_qi_men", "zhong_you_men"]
-    # # k-fold
-    # for i_fold in k_fold_list:
-    #     result = kFoldCrossVal(i_fold)
-
-    k = 4
-    train_data_batch,train_label_batch,test_data_batch,test_label_batch = load_data(k_fold_list[k])
-    train(train_data_batch,train_label_batch,test_data_batch,test_label_batch)
-    evaluate(test_data_batch,test_label_batch,hyper_parameter.SAVE_PATH,k_fold_list[k],True)
-
-
-
+    """
+     # k-fold
+    # remove old files generated by last running
+    del_files = provider.match_postfix("xyz", iscwd=True)
+    provider.removeFiles(del_files)
+    del_files = provider.match_postfix("txt", iscwd=True)
+    provider.removeFiles(del_files)
+    for i_fold in range(1,3):
+        result = kFoldCrossVal(i_fold)
+    """
+    a,b,c,d = load_data()
+    print()
 
