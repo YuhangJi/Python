@@ -339,6 +339,5 @@ if __name__ == '__main__':
     for i_fold in range(1,3):
         result = kFoldCrossVal(i_fold)
     """
-    a,b,c,d = load_data()
-    print()
+   
 
